@@ -33,7 +33,7 @@
          get_buckets/1,
          bucket_nval_map/1,
          default_object_nval/0,
-         all_n/1,
+         all_n/0, all_n/1,
          merge_props/2,
          name/1,
          n_val/1]).
@@ -41,6 +41,11 @@
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
+
+-type riak_core_ring() :: riak_core_ring:riak_core_ring().
+-type bucket_type()  :: binary().
+-type bucket_props() :: [{term(), term()}].
+-type nval_set() :: ordsets:ordset(pos_integer()).
 
 -define(METADATA_PREFIX, {core, buckets}).
 
@@ -62,7 +67,7 @@ set_bucket({<<"default">>, Name}, BucketProps) ->
 set_bucket({Type, _Name}=Bucket, BucketProps0) ->
     case riak_core_bucket_type:get(Type) of
         undefined -> 
-            lager:error("Attempt to set properties of non-existant bucket type ~p", [Bucket]),
+            lager:error("Attempt to set properties of non-existent bucket type ~p", [Bucket]),
             {error, no_type};
         _ -> set_bucket(fun set_bucket_in_metadata/2, Bucket, BucketProps0)
     end;
@@ -125,7 +130,7 @@ get_bucket(Name) ->
     Meta = riak_core_ring_manager:get_bucket_meta(Name),
     get_bucket_props(Name, Meta).
 
-%% @spec get_bucket(Name, Ring::riak_core_ring:riak_core_ring()) ->
+%% @spec get_bucket(Name, Ring::riak_core_ring()) ->
 %%          BucketProps :: riak_core_bucketprops()
 %% @private
 get_bucket({<<"default">>, Name}, Ring) ->
@@ -166,7 +171,7 @@ reset_bucket(Bucket) ->
 
 %% @doc Get bucket properties `Props' for all the buckets in the given
 %%      `Ring' and stored in metadata
--spec get_buckets(riak_core_ring:riak_core_ring()) ->
+-spec get_buckets(riak_core_ring()) ->
                          Props::list().
 get_buckets(Ring) ->
     RingNames = riak_core_ring:get_buckets(Ring),
@@ -182,7 +187,7 @@ get_buckets(Ring) ->
     RingBuckets ++ MetadataBuckets.
 
 %% @doc returns a proplist containing all buckets and their respective N values
--spec bucket_nval_map(riak_core_ring:riak_core_ring()) -> [{binary(),integer()}].
+-spec bucket_nval_map(riak_core_ring()) -> [{binary(),integer()}].
 bucket_nval_map(Ring) ->
     [{riak_core_bucket:name(B), riak_core_bucket:n_val(B)} ||
         B <- riak_core_bucket:get_buckets(Ring)].
@@ -192,13 +197,60 @@ bucket_nval_map(Ring) ->
 default_object_nval() ->
     riak_core_bucket:n_val(riak_core_bucket_props:defaults()).
 
+%% @private
+%% @doc For testing/debugging
+-spec all_n() -> [pos_integer(),...].
+all_n() ->
+    {ok, Ring} = riak_core_ring_manager:get_my_ring(),
+    all_n(Ring).
+
+-spec all_n(riak_core_ring()) -> [pos_integer(),...].
 all_n(Ring) ->
-    BucketNs = bucket_nval_map(Ring),
-    DefaultN = default_object_nval(),
-    AllN = lists:foldl(fun({_, N}, Acc) ->
-                               ordsets:add_element(N, Acc)
-                       end, [DefaultN], BucketNs),
+    BucketNVals = bucket_nvals(Ring),
+    BucketTypeNVals = bucket_type_nvals(),
+    ordsets:from_list(
+        ordsets:union(BucketNVals, BucketTypeNVals)
+    ).
+
+%% @private
+-spec bucket_nvals(riak_core_ring()) -> nval_set().
+bucket_nvals(Ring) ->
+    Buckets = riak_core_ring:get_buckets(Ring),
+    BucketProps = [get_bucket(Bucket, Ring)
+        || Bucket <- Buckets],
+    Default = app_helper:get_env(riak_core, default_bucket_props),
+    DefaultN = proplists:get_value(n_val, Default),
+    AllN = lists:foldl(
+        fun bucket_prop_nval/2,
+        ordsets:from_list([DefaultN]), BucketProps),
     AllN.
+
+%% @private
+-spec bucket_type_nvals() -> nval_set().
+bucket_type_nvals() ->
+    riak_core_bucket_type:fold(fun bucket_type_prop_nval/2, ordsets:new()).
+
+%% @private
+-spec bucket_type_prop_nval({bucket_type(), bucket_props()}, nval_set()) ->
+    nval_set().
+bucket_type_prop_nval({BType, BProps}, Accum) ->
+    case riak_core_claimant:bucket_type_status(BType) of
+        active ->
+            bucket_prop_nval(BProps, Accum);
+        _ ->
+            Accum
+    end.
+
+%% @private
+-spec bucket_prop_nval(bucket_props(), nval_set()) ->
+    nval_set().
+bucket_prop_nval(BProps, Accum) ->
+    case proplists:get_value(n_val, BProps) of
+        undefined ->
+            Accum;
+        Value ->
+            ordsets:add_element(Value, Accum)
+    end.
 
 name(BProps) ->
     proplists:get_value(name, BProps).
